@@ -4,35 +4,35 @@ use core::ptr::NonNull;
 
 type Buffer = [u8; 8];
 
-pub struct SlotRing {
-    store: [Buffer; 8],
+pub struct SlotRing<'data> {
+    store: &'data mut [Buffer],
     writer: AtomicUsize,
     reader: AtomicUsize,
 }
 
-pub struct SRProd<'slotring> {
-    _life: PhantomData<&'slotring SlotRing>,
-    sr: NonNull<SlotRing>,
+pub struct SRProd<'slotring, 'data: 'slotring> {
+    _life: PhantomData<&'slotring SlotRing<'data>>,
+    sr: NonNull<SlotRing<'data>>,
     wip: bool,
 }
 
-pub struct PGrant<'slotring: 'producer, 'producer> {
-    _life: &'producer mut SRProd<'slotring>,
+pub struct PGrant<'slotring: 'producer, 'producer, 'data: 'slotring> {
+    _life: &'producer mut SRProd<'slotring, 'data>,
     buf: &'slotring mut Buffer,
 }
 
-pub struct RGrant<'slotring: 'consumer, 'consumer> {
-    _life: &'consumer mut SRCons<'slotring>,
+pub struct RGrant<'slotring: 'consumer, 'consumer, 'data: 'slotring> {
+    _life: &'consumer mut SRCons<'slotring, 'data>,
     buf: &'slotring Buffer,
 }
 
-pub struct SRCons<'slotring> {
-    _life: PhantomData<&'slotring SlotRing>,
-    sr: NonNull<SlotRing>,
+pub struct SRCons<'slotring, 'data: 'slotring> {
+    _life: PhantomData<&'slotring SlotRing<'data>>,
+    sr: NonNull<SlotRing<'data>>,
     rip: bool,
 }
 
-impl SlotRing {
+impl<'data> SlotRing<'data> {
     pub fn split(&mut self) -> (SRProd, SRCons) {
         (
             SRProd {
@@ -49,8 +49,8 @@ impl SlotRing {
     }
 }
 
-impl<'slotring: 'producer, 'producer> SRProd<'slotring> {
-    pub fn start_write(&'producer mut self) -> Option<PGrant<'slotring, 'producer>> {
+impl<'slotring: 'producer, 'producer, 'data: 'slotring> SRProd<'slotring, 'data> {
+    pub fn start_write(&'producer mut self) -> Option<PGrant<'slotring, 'producer, 'data>> {
         let sr = unsafe { &mut *self.sr.as_ptr() };
 
         if self.wip {
@@ -60,7 +60,7 @@ impl<'slotring: 'producer, 'producer> SRProd<'slotring> {
         let idx = sr.writer.load(Ordering::SeqCst);
 
         // This is bad proof of concept logic
-        if sr.writer.load(Ordering::SeqCst) < 8 {
+        if sr.writer.load(Ordering::SeqCst) < sr.store.len() {
             sr.writer.fetch_add(1, Ordering::SeqCst);
             return Some(PGrant {
                 _life: self,
@@ -72,19 +72,19 @@ impl<'slotring: 'producer, 'producer> SRProd<'slotring> {
     }
 }
 
-impl<'slotring: 'producer, 'producer> Drop for PGrant<'slotring, 'producer> {
+impl<'slotring: 'producer, 'producer, 'data: 'slotring> Drop for PGrant<'slotring, 'producer, 'data> {
     fn drop(&mut self) {
         self._life.wip = false;
     }
 }
 
-impl<'slotring: 'producer, 'producer> PGrant<'slotring, 'producer> {
+impl<'slotring: 'producer, 'producer, 'data: 'slotring> PGrant<'slotring, 'producer, 'data> {
     fn consume(self) {
     }
 }
 
-impl<'slotring: 'consumer, 'consumer> SRCons<'slotring> {
-    pub fn start_read(&'consumer mut self) -> Option<RGrant<'slotring, 'consumer>> {
+impl<'slotring: 'consumer, 'consumer, 'data: 'slotring> SRCons<'slotring, 'data> {
+    pub fn start_read(&'consumer mut self) -> Option<RGrant<'slotring, 'consumer, 'data>> {
         let sr = unsafe { &mut *self.sr.as_ptr() };
 
         if self.rip {
@@ -94,7 +94,7 @@ impl<'slotring: 'consumer, 'consumer> SRCons<'slotring> {
         let idx = sr.reader.load(Ordering::SeqCst);
 
         // This is bad proof of concept logic
-        if idx < 8 {
+        if idx < sr.store.len() {
             sr.reader.fetch_add(1, Ordering::SeqCst);
             return Some(RGrant {
                 _life: self,
@@ -106,13 +106,13 @@ impl<'slotring: 'consumer, 'consumer> SRCons<'slotring> {
     }
 }
 
-impl<'slotring: 'consumer, 'consumer> Drop for RGrant<'slotring, 'consumer> {
+impl<'slotring: 'consumer, 'consumer, 'data: 'slotring> Drop for RGrant<'slotring, 'consumer, 'data> {
     fn drop(&mut self) {
         self._life.rip = false;
     }
 }
 
-impl<'slotring: 'consumer, 'consumer> RGrant<'slotring, 'consumer> {
+impl<'slotring: 'consumer, 'consumer, 'data: 'slotring> RGrant<'slotring, 'consumer, 'data> {
     fn consume(self) {
     }
 }
@@ -124,8 +124,9 @@ mod test {
 
     #[test]
     fn basic() {
+        let mut data = [[0u8; 8]; 8];
         let mut x = SlotRing {
-            store: [[0u8; 8]; 8],
+            store: &mut data,
             writer: AtomicUsize::new(0),
             reader: AtomicUsize::new(0),
         };
